@@ -25,6 +25,7 @@
 #include "dmtcp.h"
 
 #define _real_fork NEXT_FNC(fork)
+#define _real_getpid NEXT_FNC(getpid)
 #define _real_execve NEXT_FNC(execve)
 #define _real_execvp NEXT_FNC(execvp)
 #define _real_execvpe NEXT_FNC(execvpe)
@@ -37,6 +38,9 @@
 #define _real_dlopen NEXT_FNC(dlopen)
 #define _real_dlsym NEXT_FNC(dlsym)
 #define _real_system NEXT_FNC(system)
+
+#define _real_socket NEXT_FNC(socket)
+#define _real_connect NEXT_FNC(connect)
 
 // General
 bool runUnderRMgr();

@@ -34,8 +34,13 @@
 #include <jfilesystem.h>
 #include <dmtcp.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <assert.h>
 #include "rm_main.h"
 #include "rm_slurm.h"
+#include "slurm_helper.h"
 
 static char *srunHelper = "dmtcp_srun_helper";
 
@@ -341,20 +346,22 @@ int slurmRestoreFile(const char *path, const char *savedFilePath,
 }
 
 // Deal with srun
-static bool isSrunHelper = false;
+static bool is_srun_helper = false;
 static int slurm_srun_stdin = -1;
 static int slurm_srun_stdout = -1;
 static int slurm_srun_stderr = -1;
+static int *srun_pid = NULL;
 
 // FIXME: this is a hackish solution. TODO: add this to plugin API.
 extern "C" void process_fd_event(int event, int arg1, int arg2 = -1);
 
-extern "C" void slurm_srun_register_fds(int in, int out, int err)
+extern "C" void slurm_srun_handler_register(int in, int out, int err, int *sp)
 {
-  isSrunHelper = true;
+  is_srun_helper = true;
   slurm_srun_stdin = in;
   slurm_srun_stdout = out;
   slurm_srun_stderr = err;
+  srun_pid = sp;
 
   process_fd_event(SYS_close, in);
   process_fd_event(SYS_close, out);
@@ -363,7 +370,80 @@ extern "C" void slurm_srun_register_fds(int in, int out, int err)
 
 void slurmHelperRestoreFds(bool isRestart)
 {
-  if( isSrunHelper && isRestart ){
+  if( is_srun_helper && isRestart ){
     JTRACE("Will restore helper's FDs");
   }
 }
+
+static int connect_to_restart_helper(char *path)
+{
+  static struct sockaddr_un sa;
+  static socklen_t  salen;
+  memset(&sa, 0, sizeof(sa));
+  int sd = _real_socket(AF_UNIX, SOCK_STREAM, 0);
+  assert( sd >= 0 );
+  sa.sun_family = AF_UNIX;
+  memcpy(&sa.sun_path, path, sizeof(sa.sun_path));
+  assert( _real_connect(sd,(struct sockaddr*) &sa, sizeof(sa)) == 0);
+  return sd;
+}
+
+static int create_fd_tx_socket(sockaddr_un *sa)
+{
+  socklen_t slen = sizeof(*sa);
+  memset(sa, 0, sizeof(*sa));
+  int sd = socket(AF_UNIX, SOCK_DGRAM, 0);
+  assert( sd >= 0 );
+  sa->sun_family = AF_UNIX;
+  assert( bind(sd, (struct sockaddr*)sa, slen) == 0);
+  assert(getsockname(sd,(struct sockaddr *)sa, &slen) == 0);
+  return sd;
+}
+
+void get_fd(int txfd, int fd)
+{
+  int data;
+  int ret = slurm_receiveFd(txfd, &data, sizeof(data));
+
+  _real_close(fd);
+  _real_dup2(ret, fd);
+  _real_close(ret);
+}
+
+static void restart_helper()
+{
+  char *path = getenv(DMTCP_SLURM_HELPER_ADDR_ENV);
+  if( !(is_srun_helper && path) ){
+    return;
+  }
+  int sd = connect_to_restart_helper(path);
+  int pid = _real_getpid();
+  assert( write(sd, &pid, sizeof(pid)) == sizeof(pid) );
+  assert( read(sd,srun_pid, sizeof(*srun_pid)) == sizeof(*srun_pid));
+
+  struct sockaddr_un sa;
+  int fd_sock = create_fd_tx_socket(&sa);
+  assert( write(sd, &sa, sizeof(sa)) == sizeof(sa));
+
+  get_fd(fd_sock, slurm_srun_stdin);
+  get_fd(fd_sock, slurm_srun_stdout);
+  get_fd(fd_sock, slurm_srun_stderr);
+  close(sd);
+}
+
+void slurmRestoreHelper( bool isRestart )
+{
+  if( isRestart && is_srun_helper){
+    {
+      JTRACE("This is srun helper. Restore it");
+      int delay = 1;
+      while(delay){
+        sleep(1);
+      }
+    }
+
+    restart_helper();
+  }
+}
+
+
