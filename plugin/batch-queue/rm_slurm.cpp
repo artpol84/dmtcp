@@ -33,6 +33,7 @@
 #include <jconvert.h>
 #include <jfilesystem.h>
 #include <dmtcp.h>
+#include <sys/syscall.h>
 #include "rm_main.h"
 #include "rm_slurm.h"
 
@@ -345,12 +346,19 @@ static int slurm_srun_stdin = -1;
 static int slurm_srun_stdout = -1;
 static int slurm_srun_stderr = -1;
 
-extern "C" void slurmHelperRegisterFds(int in, int out, int err)
+// FIXME: this is a hackish solution. TODO: add this to plugin API.
+extern "C" void process_fd_event(int event, int arg1, int arg2 = -1);
+
+extern "C" void slurm_srun_register_fds(int in, int out, int err)
 {
   isSrunHelper = true;
   slurm_srun_stdin = in;
   slurm_srun_stdout = out;
   slurm_srun_stderr = err;
+
+  process_fd_event(SYS_close, in);
+  process_fd_event(SYS_close, out);
+  process_fd_event(SYS_close, err);
 }
 
 void slurmHelperRestoreFds(bool isRestart)
