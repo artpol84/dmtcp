@@ -1,3 +1,4 @@
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -145,7 +146,7 @@ static struct Buffer stdin_buffer, stdout_buffer, stderr_buffer;
  * Signal handler for signals that cause the program to terminate.  These
  * signals must be trapped to restore terminal modes.
  */
-static void signal_handler(int sig)
+static void initial_signal_handler(int sig)
 {
   quit_pending = 1;
   if( sig == SIGCHLD ){
@@ -157,23 +158,136 @@ static void signal_handler(int sig)
   }
 }
 
-static void setup_signals()
+static void setup_initial_signals()
 {
   if (signal(SIGHUP, SIG_IGN) != SIG_IGN)
-    signal(SIGHUP, signal_handler);
+    signal(SIGHUP, initial_signal_handler);
   if (signal(SIGINT, SIG_IGN) != SIG_IGN)
-    signal(SIGINT, signal_handler);
+    signal(SIGINT, initial_signal_handler);
   if (signal(SIGQUIT, SIG_IGN) != SIG_IGN)
-    signal(SIGQUIT, signal_handler);
+    signal(SIGQUIT, initial_signal_handler);
   if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
-    signal(SIGTERM, signal_handler);
+    signal(SIGTERM, initial_signal_handler);
 
   if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
-    signal(SIGTERM, signal_handler);
+    signal(SIGTERM, initial_signal_handler);
 
   // Track srun
-  signal(SIGCHLD, signal_handler);
+  signal(SIGCHLD, initial_signal_handler);
 }
+
+static void restart_signal_handler(int sig)
+{
+  int delay = 1;
+  while( delay ){
+    int i = 0;
+    for(; i< 1000000; i++);
+  }
+  quit_pending = 1;
+  if( sig == SIGCHLD ){
+    // TODO: wait stuff here?
+    // Forward termination to initial handler
+    // so mpirun/mpiexec will know that it was terminated
+    kill(helper_pid, SIGKILL );
+    return;
+  }
+  if (srun_pid != -1) {
+    kill(srun_pid, sig);
+  }
+}
+
+static void setup_restart_signals()
+{
+  if (signal(SIGHUP, SIG_IGN) != SIG_IGN)
+    signal(SIGHUP, restart_signal_handler);
+  if (signal(SIGINT, SIG_IGN) != SIG_IGN)
+    signal(SIGINT, restart_signal_handler);
+  if (signal(SIGQUIT, SIG_IGN) != SIG_IGN)
+    signal(SIGQUIT, restart_signal_handler);
+  if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
+    signal(SIGTERM, restart_signal_handler);
+
+  if (signal(SIGTERM, SIG_IGN) != SIG_IGN)
+    signal(SIGTERM, restart_signal_handler);
+
+  // Track srun
+  signal(SIGCHLD, restart_signal_handler);
+}
+
+static void create_usock_file(char *path, int maxlen)
+{
+  memset(path, 0, maxlen);
+  // TODO: change /tmp to tmpdir env
+  snprintf(path, maxlen-1, "/tmp/srun_helper_usock_%d.XXXXXX");
+  int fd;
+  assert( (fd = mkstemp(path)) >= 0 );
+  close(fd);
+  unlink(path);
+}
+
+static int create_listen_socket(char **path)
+{
+  static struct sockaddr_un sa;
+  static socklen_t  salen;
+  memset(&sa, 0, sizeof(sa));
+  int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  assert( sfd >= 0 );
+  sa.sun_family = AF_UNIX;
+  create_usock_file((char*)&sa.sun_path, sizeof(sa.sun_path));
+  if( bind(sfd, (struct sockaddr*)&sa, sizeof(sa)) != 0 ){
+    printf("error: %s\n",strerror(errno));
+  }
+  salen = sizeof(sa);
+  assert(getsockname(sfd, (struct sockaddr *)&sa, &salen) == 0);
+  assert( listen(sfd, 1) == 0) ;
+  *path = strdup(sa.sun_path);
+  return sfd;
+}
+
+static void prepare_initial_helper()
+{
+  char *path;
+  restart_sock = create_listen_socket(&path);
+  setenv(DMTCP_SLURM_HELPER_ADDR_ENV, path, 1);
+}
+
+
+#include <errno.h>
+extern int errno;
+
+static void setup_initial_helper()
+{
+
+  {
+    int delay = 1;
+    while(delay){
+      sleep(1);
+    }
+  }
+
+  int sd;
+  struct sockaddr_un sa;
+  socklen_t slen = sizeof(sa);
+  if( ( sd = accept(restart_sock, (struct sockaddr*)&sa, &slen)) < 0 ){
+    perror("accept from initial handler");
+    exit(-1);
+  }
+  pid_t pid = getpid();
+
+  // exchange pid info
+  assert( read(sd,&helper_pid, sizeof(helper_pid)) == sizeof(helper_pid));
+  assert( write(sd, &pid, sizeof(pid)) == sizeof(pid) );
+
+  assert( read(sd, &sa, sizeof(sa)) == sizeof(sa) );
+  int fd_sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+  slurm_sendFd(fd_sock,srun_stdin, &srun_stdin, sizeof(int), sa, sizeof(sa));
+  slurm_sendFd(fd_sock,srun_stdout, &srun_stdout, sizeof(int), sa, sizeof(sa));
+  slurm_sendFd(fd_sock,srun_stderr, &srun_stderr, sizeof(int), sa, sizeof(sa));
+  close(fd_sock);
+  close(sd);
+  close(restart_sock);
+}
+
 
 static void create_stdio_fds(int *in, int *out, int *err)
 {
@@ -357,12 +471,32 @@ int main(int argc, char **argv, char **envp)
   }
 
   create_stdio_fds(pipe_in, pipe_out, pipe_err);
+
+  if( strcmp("-r", argv[1]) == 0 ){
+    restart_helper = true;
+    // skip "-r" flag
+    argc--;
+    argv++;
+    // Prepare evironment and siganls
+    prepare_initial_helper();
+  }
+
   srun_pid = fork_srun(argc, argv);
-  setup_signals();
-  // This is initial helper
-  assert(slurm_srun_handler_register != NULL);
-  slurm_srun_handler_register(srun_stdin, srun_stdout, srun_stderr, &srun_pid);
-  client_loop();
+
+  if( !restart_helper ){
+    setup_initial_signals();
+    // This is initial helper
+    assert(slurm_srun_handler_register != NULL);
+    slurm_srun_handler_register(srun_stdin, srun_stdout, srun_stderr, &srun_pid);
+    client_loop();
+  }else{
+    setup_restart_signals();
+    setup_initial_helper();
+    while( !quit_pending ){
+      sleep(1);
+    }
+  }
+
   wait(&status);
   return status;
 }

@@ -4,7 +4,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define DMTCP_SLURM_HELPER_ADDR_ENV "DMTCP_RESTART_HELPER_ADDR"
+#define DMTCP_SLURM_HELPER_ADDR_ENV "DMTCP_SRUN_HELPER_ADDR"
 
 //-------------------------------------8<------------------------------------------------//
 // This is a copy of the code from src/plugin/ipc/utils_ipc.cpp and SSH plugin
