@@ -349,23 +349,18 @@ int slurmRestoreFile(const char *path, const char *savedFilePath,
 
 // Deal with srun
 static bool is_srun_helper = false;
-static int *slurm_srun_stdin = NULL;
-static int *slurm_srun_stdout = NULL;
-static int *slurm_srun_stderr = NULL;
-static int *srun_pid = NULL;
+static int *after_restart = NULL;
 
 // FIXME: this is a hackish solution. TODO: add this to plugin API.
 extern "C" void process_fd_event(int event, int arg1, int arg2 = -1);
 
-extern "C" void slurm_srun_handler_register(int *in, int *out, int *err)
+extern "C" void slurm_srun_handler_register(int *ptr, int in, int out, int err)
 {
   is_srun_helper = true;
-  slurm_srun_stdin = in;
-  slurm_srun_stdout = out;
-  slurm_srun_stderr = err;
   process_fd_event(SYS_close, in);
   process_fd_event(SYS_close, out);
   process_fd_event(SYS_close, err);
+  after_restart = ptr;
 }
 
 void slurmRestoreHelper( bool isRestart )
@@ -378,10 +373,8 @@ void slurmRestoreHelper( bool isRestart )
         sleep(1);
       }
     }
+    *after_restart = 1;
 
-    *slurm_srun_stdin = -1;
-    *slurm_srun_stdout = -1;
-    *slurm_srun_stderr = -1;
   }
 }
 

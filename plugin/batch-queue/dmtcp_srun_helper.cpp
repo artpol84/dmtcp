@@ -18,16 +18,16 @@
 #include <sys/socket.h>
 #include "slurm_helper.h"
 
-extern "C" void slurm_srun_handler_register(int in, int out, int err, int *sp) __attribute((weak));
+extern "C" void slurm_srun_handler_register(int *ptr, int in, int out, int err) __attribute((weak));
 
 int quit_pending = 0;
+int rstr_quit_pending = 0;
 int pipe_in[2], pipe_out[2], pipe_err[2];
 int srun_stdin = -1;
 int srun_stdout = -1;
 int srun_stderr = -1;
-pid_t srun_pid = -1, helper_pid = -1;
-bool restart_helper = false;
-int restart_sock = -1;
+pid_t srun_pid = -1;
+int in_restart = 0;
 
 //-------------------------------------8<------------------------------------------------//
 // FIXME: this is exactly the same code as in src/plugin/ipc/ssh/util_ssh.cpp
@@ -147,13 +147,21 @@ static struct Buffer stdin_buffer, stdout_buffer, stderr_buffer;
  */
 static void signal_handler(int sig)
 {
-  quit_pending = 1;
+  if( !quit_pending ){
+    quit_pending = 1;
+  } else {
+    rstr_quit_pending = 1;
+  }
+
   if( sig == SIGCHLD ){
     // TODO: wait stuff here?
     return;
   }
-  if (srun_pid != -1) {
-    kill(srun_pid, sig);
+  if( !rstr_quit_pending ){
+    // Forward signals only at initial run
+    if (srun_pid != -1) {
+      kill(srun_pid, sig);
+    }
   }
 }
 
@@ -247,7 +255,7 @@ pid_t fork_srun(int argc, char **argv)
   return pid;
 }
 
-void client_loop()
+static void initial_loop()
 {
   static struct Buffer stdin_buffer, stdout_buffer, stderr_buffer;
 
@@ -268,7 +276,7 @@ void client_loop()
 
   max_fd = MAX( MAX(srun_stdin, srun_stdout), srun_stderr);
 
-  /* Main loop of the client for the interactive session mode. */
+  /* Loop before checkpoint. */
   while (!quit_pending) {
     struct timeval tv = {10, 0};
 
@@ -346,6 +354,12 @@ void client_loop()
   buffer_free(&stderr_buffer);
 }
 
+static void restart_loop()
+{
+  while( !rstr_quit_pending ){
+    sleep(1);
+  }
+}
 
 int main(int argc, char **argv, char **envp)
 {
@@ -361,8 +375,13 @@ int main(int argc, char **argv, char **envp)
   setup_signals();
   // This is initial helper
   assert(slurm_srun_handler_register != NULL);
-  slurm_srun_handler_register(srun_stdin, srun_stdout, srun_stderr, &srun_pid);
-  client_loop();
-  wait(&status);
-  return status;
+  slurm_srun_handler_register(&in_restart, srun_stdin, srun_stdout, srun_stderr);
+  initial_loop();
+  if( in_restart ){
+    restart_loop();
+    return 0;
+  } else {
+    wait(&status);
+    return status;
+  }
 }
