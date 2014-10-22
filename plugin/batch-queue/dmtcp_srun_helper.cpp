@@ -21,7 +21,6 @@
 extern "C" void slurm_srun_handler_register(int *ptr, int in, int out, int err) __attribute((weak));
 
 int quit_pending = 0;
-int rstr_quit_pending = 0;
 int pipe_in[2], pipe_out[2], pipe_err[2];
 int srun_stdin = -1;
 int srun_stdout = -1;
@@ -136,28 +135,18 @@ static void set_nonblock(int fd)
 // End of FIXME
 //-------------------------------------8<------------------------------------------------//
 
-
-
-
-static struct Buffer stdin_buffer, stdout_buffer, stderr_buffer;
-
 /*
  * Signal handler for signals that cause the program to terminate.  These
  * signals must be trapped to restore terminal modes.
  */
 static void signal_handler(int sig)
 {
-  if( !quit_pending ){
-    quit_pending = 1;
-  } else {
-    rstr_quit_pending = 1;
-  }
-
+  quit_pending = 1;
   if( sig == SIGCHLD ){
     // TODO: wait stuff here?
     return;
   }
-  if( !rstr_quit_pending ){
+  if( !in_restart ){
     // Forward signals only at initial run
     if (srun_pid != -1) {
       kill(srun_pid, sig);
@@ -185,28 +174,12 @@ static void setup_signals()
 
 static void create_stdio_fds(int *in, int *out, int *err)
 {
-  struct stat buf;
-  if (fstat(STDIN_FILENO,  &buf)  == -1) {
-    int fd = open("/dev/null", O_RDWR);
-    if (fd != STDIN_FILENO) {
-      dup2(fd, STDIN_FILENO);
-      close(fd);
-    }
-  }
-  if (fstat(STDOUT_FILENO,  &buf)  == -1) {
-    int fd = open("/dev/null", O_RDWR);
-    if (fd != STDOUT_FILENO) {
-      dup2(fd, STDOUT_FILENO);
-      close(fd);
-    }
-  }
-  if (fstat(STDERR_FILENO,  &buf)  == -1) {
-    int fd = open("/dev/null", O_RDWR);
-    if (fd != STDERR_FILENO) {
-      dup2(fd, STDERR_FILENO);
-      close(fd);
-    }
-  }
+  struct stat buf, dev_null;
+  bool have_dev_null = true;
+
+  in[0] = in[1] = -1;
+  out[0] = out[1] = -1;
+  err[0] = err[1] = -1;
 
   // Close all open file descriptors
   int maxfd = sysconf(_SC_OPEN_MAX);
@@ -214,15 +187,51 @@ static void create_stdio_fds(int *in, int *out, int *err)
       close(i);
   }
 
+  if( stat("/dev/null",&dev_null) == -1 ){
+    have_dev_null = false;
+    perror("stat(/dev/null");
+  }
+
+  if( fstat(STDIN_FILENO,  &buf) == -1 )
+    goto stdout_setup;
+  if( have_dev_null && buf.st_ino == dev_null.st_ino ){
+    goto stdout_setup;
+  }
   if (pipe(in) != 0) {
-    perror("Error creating pipe: ");
+    perror("Error creating STDIN pipe for srun: ");
+  }
+
+stdout_setup:
+  if (fstat(STDOUT_FILENO,  &buf)  == -1)
+    goto stderr_setup;
+  if( have_dev_null && buf.st_ino == dev_null.st_ino ){
+    goto stderr_setup;
   }
   if (pipe(out) != 0) {
     perror("Error creating pipe: ");
   }
+
+stderr_setup:
+  if (fstat(STDERR_FILENO,  &buf)  == -1) {
+    goto exit;
+  }
+  if( have_dev_null && buf.st_ino == dev_null.st_ino ){
+    goto exit;
+  }
   if (pipe(err) != 0) {
     perror("Error creating pipe: ");
   }
+exit:
+  return;
+}
+
+#define FWD_TO_DEV_NULL(fd) \
+{ \
+  int tmp = open("/dev/null", O_CREAT|O_RDWR|O_TRUNC, 0666); \
+  if (tmp >= 0 && tmp != fd ) { \
+    dup2(tmp, fd); \
+    close(tmp); \
+  } \
 }
 
 pid_t fork_srun(int argc, char **argv)
@@ -231,22 +240,42 @@ pid_t fork_srun(int argc, char **argv)
   unsetenv("LD_PRELOAD");
   pid_t pid = fork();
   if( pid == 0 ) {
-    close(in[1]);
-    close(out[0]);
-    close(err[0]);
-    dup2(in[0], STDIN_FILENO);
-    dup2(out[1], STDOUT_FILENO);
-    dup2(err[1], STDERR_FILENO);
 
+    if( in[0] >= 0 && in[1] >= 0 ){
+      dup2(in[0], STDIN_FILENO);
+      close(in[0]);
+      close(in[1]);
+    }else{
+      FWD_TO_DEV_NULL(STDIN_FILENO);
+    }
+
+    if( out[0] >=0 && out[1] >= 0 ){
+      dup2(out[1], STDOUT_FILENO);
+      close(out[0]);
+      close(out[1]);
+    }else{
+      FWD_TO_DEV_NULL(STDOUT_FILENO);
+    }
+
+    if( err[0] >=0 && err[1] >= 0 ){
+      dup2(err[1], STDERR_FILENO);
+      close(err[0]);
+      close(err[1]);
+    }else{
+      FWD_TO_DEV_NULL(STDERR_FILENO);
+    }
     unsetenv("LD_PRELOAD");
     execvp(argv[1], &argv[1]);
     printf("%s:%d DMTCP Error detected. Failed to exec.", __FILE__, __LINE__);
     abort();
   }
 
-  close(in[0]);
-  close(out[1]);
-  close(err[1]);
+  if( in[0] >= 0 )
+    close(in[0]);
+  if( out[1] >= 0 )
+    close(out[1]);
+  if( err[1] >= 0 )
+    close(err[1]);
 
   srun_stdin = in[1];
   srun_stdout = out[0];
@@ -255,21 +284,54 @@ pid_t fork_srun(int argc, char **argv)
   return pid;
 }
 
+#define BUF_INIT(ifd, ofd, buf) \
+  if( ifd >= 0 && ofd >= 0 ){  \
+    set_nonblock(ifd);  \
+    set_nonblock(ofd);  \
+    buffer_init(&buf); \
+  }
+
+#define BUF_PREPARE(ifd, ofd, buf, rset, wset) \
+  if( ifd >= 0 && ofd >= 0 ){  \
+    if (buffer_ready_for_read(&buf)) { \
+      FD_SET(ifd, &readset); \
+    } \
+    if( buffer_ready_for_write(&buf) ){ \
+      FD_SET(ofd, &writeset); \
+    } \
+  }
+
+#define BUF_PROCESS(ifd, ofd, buf, rset, wset) \
+  if( ifd >= 0 && ofd >= 0 ){  \
+    if (FD_ISSET(ifd, &rset)) { \
+      buffer_read(&buf, ifd); \
+    } \
+    if( FD_ISSET(ofd, &wset) ){ \
+      buffer_write(&buf, ofd); \
+    } \
+  }
+
+#define BUF_FINI(ifd, ofd, buf, drain) \
+  if( ifd >=0 && ofd >=0 ){ \
+    if( drain ){ \
+      if(buffer_ready_for_write(&buf)) { \
+        buffer_write(&buf, ofd); \
+      } \
+      buffer_free(&buf); \
+    } \
+  }
+
 static void initial_loop()
 {
   static struct Buffer stdin_buffer, stdout_buffer, stderr_buffer;
 
-  /* Initialize buffers. */
-  buffer_init(&stdin_buffer);
-  buffer_init(&stdout_buffer);
-  buffer_init(&stderr_buffer);
+  if( srun_stdin < 0 && srun_stdout < 0 && srun_stderr < 0 ){
+    return;
+  }
 
-  /* enable nonblocking unless tty */
-  set_nonblock(fileno(stdin));
-  set_nonblock(fileno(stdout));
-  set_nonblock(fileno(stderr));
-
-
+  BUF_INIT(STDIN_FILENO, srun_stdin, stdin_buffer );
+  BUF_INIT(srun_stdout, STDOUT_FILENO, stdout_buffer );
+  BUF_INIT(srun_stderr, STDERR_FILENO, stderr_buffer );
 
   fd_set readset, writeset, errorset;
   int max_fd = 0;
@@ -285,25 +347,9 @@ static void initial_loop()
     FD_ZERO(&readset);
     FD_ZERO(&writeset);
 
-    if (buffer_ready_for_read(&stdin_buffer)) {
-      FD_SET(STDIN_FILENO, &readset);
-    }
-    if (buffer_ready_for_read(&stdout_buffer)) {
-      FD_SET(srun_stdout, &readset);
-    }
-    if (buffer_ready_for_read(&stderr_buffer)) {
-      FD_SET(srun_stderr, &readset);
-    }
-
-    if (buffer_ready_for_write(&stdin_buffer)) {
-      FD_SET(srun_stdin, &writeset);
-    }
-    if (buffer_ready_for_write(&stdout_buffer)) {
-      FD_SET(STDOUT_FILENO, &writeset);
-    }
-    if (buffer_ready_for_write(&stderr_buffer)) {
-      FD_SET(STDERR_FILENO, &writeset);
-    }
+    BUF_PREPARE(STDIN_FILENO, srun_stdin, stdin_buffer, readset, writeset );
+    BUF_PREPARE(srun_stdout, STDOUT_FILENO, stdout_buffer, readset, writeset );
+    BUF_PREPARE(srun_stderr, STDERR_FILENO, stderr_buffer, readset, writeset );
 
     int ret = select(max_fd, &readset, &writeset, &errorset, &tv);
     if (ret == -1 && errno == EINTR) {
@@ -317,46 +363,19 @@ static void initial_loop()
     if (quit_pending)
       break;
 
-    //Read from our STDIN or stdout/err of ssh
-    if (FD_ISSET(STDIN_FILENO, &readset)) {
-      buffer_read(&stdin_buffer, STDIN_FILENO);
-    }
-    if (FD_ISSET(srun_stdout, &readset)) {
-      buffer_read(&stdout_buffer, srun_stdout);
-    }
-    if (FD_ISSET(srun_stderr, &readset)) {
-      buffer_read(&stderr_buffer, srun_stderr);
-    }
-
-    // Write to our stdout/err or stdin of ssh
-    if (FD_ISSET(srun_stdin, &writeset)) {
-      buffer_write(&stdin_buffer, srun_stdin);
-    }
-    if (FD_ISSET(STDOUT_FILENO, &writeset)) {
-      buffer_write(&stdout_buffer, STDOUT_FILENO);
-    }
-    if (FD_ISSET(STDERR_FILENO, &writeset)) {
-      buffer_write(&stderr_buffer, STDERR_FILENO);
-    }
+    BUF_PROCESS(STDIN_FILENO, srun_stdin, stdin_buffer, readset, writeset );
+    BUF_PROCESS(srun_stdout, STDOUT_FILENO, stdout_buffer, readset, writeset );
+    BUF_PROCESS(srun_stderr, STDERR_FILENO, stderr_buffer, readset, writeset );
   }
 
-  /* Write pending data to our stdout/stderr */
-  if (buffer_ready_for_write(&stdout_buffer)) {
-    buffer_write(&stdout_buffer, STDOUT_FILENO);
-  }
-  if (buffer_ready_for_write(&stderr_buffer)) {
-    buffer_write(&stderr_buffer, STDERR_FILENO);
-  }
-
-  /* Clear and free any buffers. */
-  buffer_free(&stdin_buffer);
-  buffer_free(&stdout_buffer);
-  buffer_free(&stderr_buffer);
+  BUF_FINI(STDIN_FILENO, srun_stdin, stdin_buffer, 0);
+  BUF_FINI(srun_stdout, STDOUT_FILENO, stdout_buffer, 1);
+  BUF_FINI(srun_stderr, STDERR_FILENO, stderr_buffer, 1);
 }
 
 static void restart_loop()
 {
-  while( !rstr_quit_pending ){
+  while( !quit_pending ){
     sleep(1);
   }
 }
@@ -370,14 +389,22 @@ int main(int argc, char **argv, char **envp)
     exit(1);
   }
 
+//  {
+//    int delay = 1;
+//    while(delay){
+//      sleep(1);
+//    }
+//  }
+
   create_stdio_fds(pipe_in, pipe_out, pipe_err);
   srun_pid = fork_srun(argc, argv);
   setup_signals();
   // This is initial helper
   assert(slurm_srun_handler_register != NULL);
   slurm_srun_handler_register(&in_restart, srun_stdin, srun_stdout, srun_stderr);
+
   initial_loop();
-  if( in_restart ){
+  if( in_restart || !quit_pending ){
     restart_loop();
     return 0;
   } else {

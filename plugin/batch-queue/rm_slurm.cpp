@@ -42,7 +42,7 @@
 #include "rm_slurm.h"
 #include "slurm_helper.h"
 
-static char *srunHelper = "dmtcp_srun_helper";
+static const char *srunHelper = "dmtcp_srun_helper";
 
 void probeSlurm()
 {
@@ -366,13 +366,13 @@ extern "C" void slurm_srun_handler_register(int *ptr, int in, int out, int err)
 void slurmRestoreHelper( bool isRestart )
 {
   if( isRestart && is_srun_helper){
-    {
-      JTRACE("This is srun helper. Restore it");
-      int delay = 1;
-      while(delay){
-        sleep(1);
-      }
-    }
+    JTRACE("This is srun helper. Restore it");
+//    {
+//      int delay = 1;
+//      while(delay){
+//        sleep(1);
+//      }
+//    }
     *after_restart = 1;
 
   }
