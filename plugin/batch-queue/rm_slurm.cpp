@@ -40,6 +40,7 @@
 #include <assert.h>
 #include "rm_main.h"
 #include "rm_slurm.h"
+#include "slurm_helper.h"
 
 static const char *srunHelper = "dmtcp_srun_helper";
 
@@ -347,25 +348,122 @@ int slurmRestoreFile(const char *path, const char *savedFilePath,
 
 // Deal with srun
 static bool is_srun_helper = false;
-static int *after_restart = NULL;
+static int srun_stdin;
+static int srun_stdout;
+static int srun_stderr;
+static int *srun_pid = NULL;
 
 // FIXME: this is a hackish solution. TODO: add this to plugin API.
 extern "C" void process_fd_event(int event, int arg1, int arg2 = -1);
 
-extern "C" void slurm_srun_handler_register(int *ptr, int in, int out, int err)
+extern "C" void slurm_srun_handler_register(int in, int out, int err, int *pid)
 {
-  is_srun_helper = true;
   process_fd_event(SYS_close, in);
   process_fd_event(SYS_close, out);
   process_fd_event(SYS_close, err);
-  after_restart = ptr;
+  srun_stdin = in;
+  srun_stdout = out;
+  srun_stderr = err;
+  srun_pid = pid;
+  is_srun_helper = true;
 }
+
+static int connect_to_restart_helper(char *path)
+{
+  static struct sockaddr_un sa;
+  memset(&sa, 0, sizeof(sa));
+  int sd = _real_socket(AF_UNIX, SOCK_STREAM, 0);
+  assert( sd >= 0 );
+  sa.sun_family = AF_UNIX;
+  memcpy(&sa.sun_path, path, sizeof(sa.sun_path));
+  assert( _real_connect(sd,(struct sockaddr*) &sa, sizeof(sa)) == 0);
+  return sd;
+}
+
+static int create_fd_tx_socket(sockaddr_un *sa)
+{
+  socklen_t slen = sizeof(*sa);
+  memset(sa, 0, sizeof(*sa));
+  int sd = socket(AF_UNIX, SOCK_DGRAM, 0);
+  assert( sd >= 0 );
+  sa->sun_family = AF_UNIX;
+  assert( bind(sd, (struct sockaddr*)sa, slen) == 0);
+  assert(getsockname(sd,(struct sockaddr *)sa, &slen) == 0);
+  return sd;
+}
+
+void get_fd(int txfd, int fd)
+{
+  int data;
+  int ret = slurm_receiveFd(txfd, &data, sizeof(data));
+  assert( ret >= 0 );
+  if( fd < 0 ){ // We don't want this fd
+    _real_close(ret);
+  } else if( fd != ret ){
+    _real_close(fd);
+    _real_dup2(ret, fd);
+    _real_close(ret);
+  }
+}
+
+int move_fd_after(int fd, int min_fd)
+{
+  if( fd > min_fd )
+    return fd;
+  int i = min_fd + 1;
+  while( i < 65000 ){
+    if( fcntl(i,F_GETFL) == -1 ){
+      // this fd is free
+      int ret = dup2(fd, i);
+      close(fd);
+      return i;
+    }
+    i++;
+  }
+}
+
+extern "C" pid_t dmtcp_get_real_pid();
+
+static void restart_helper()
+{
+  char *path = getenv(DMTCP_SRUN_HELPER_ADDR_ENV);
+  if( !(is_srun_helper && path) ){
+    return;
+  }
+  int min_fd = MAX(MAX(srun_stdin, srun_stdout),srun_stderr);
+  int sd = connect_to_restart_helper(path);
+  sd = move_fd_after(sd,min_fd);
+
+  // TODO: is this normal way to obtain real PID?
+  int pid = dmtcp_get_real_pid();
+
+  JASSERT( write(sd, &pid, sizeof(pid)) == sizeof(pid) );
+  JASSERT( read(sd,srun_pid, sizeof(*srun_pid)) == sizeof(*srun_pid));
+
+  struct sockaddr_un sa;
+  int txfd = create_fd_tx_socket(&sa);
+  txfd = move_fd_after(txfd,min_fd);
+  JASSERT( write(sd, &sa, sizeof(sa)) == sizeof(sa));
+
+  get_fd(txfd, srun_stdin);
+  get_fd(txfd, srun_stdout);
+  get_fd(txfd, srun_stderr);
+  close(sd);
+  close(txfd);
+}
+
 
 void slurmRestoreHelper( bool isRestart )
 {
   if( isRestart && is_srun_helper){
     JTRACE("This is srun helper. Restore it");
-    *after_restart = 1;
+//    {
+//      int delay = 1;
+//      while (delay) {
+//        sleep(1);
+//      }
+//    }
+    restart_helper();
   }
 }
 
