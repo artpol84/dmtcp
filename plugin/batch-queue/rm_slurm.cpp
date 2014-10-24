@@ -201,6 +201,14 @@ static int patch_srun_cmdline(char * const argv_old[], char ***_argv_new)
   return ret;
 }
 
+static void occupate_stdio()
+{
+  int fd;
+  for(fd=0; fd<3; fd++){
+    CHECK_FWD_TO_DEV_NULL(fd);
+  }
+}
+
 extern "C" int execve (const char *filename, char *const argv[],
                        char *const envp[])
 {
@@ -221,7 +229,8 @@ extern "C" int execve (const char *filename, char *const argv[],
 
   char helper_path[PATH_MAX];
   JASSERT(dmtcp::Util::expandPathname(srunHelper, helper_path, sizeof(helper_path)) == 0 );
-
+  // We need this step to protect stdio fd's from being opened for other purposes.
+  occupate_stdio();
   return _real_execve(helper_path, argv_new, envp);
 }
 
@@ -243,6 +252,8 @@ extern "C" int execvp (const char *filename, char *const argv[])
   JTRACE( "How command looks from exec*:" );
   JTRACE("CMD:")(cmdline);
 
+  // We need this step to protect stdio fd's from being opened for other purposes.
+  occupate_stdio();
   return _real_execvp(srunHelper, argv_new);
 }
 
@@ -266,6 +277,8 @@ extern "C" int execvpe (const char *filename, char *const argv[],
   JTRACE( "How command looks from exec*:" );
   JTRACE("CMD:")(cmdline);
 
+  // We need this step to protect stdio fd's from being opened for other purposes.
+  occupate_stdio();
   return _real_execvpe(srunHelper, argv_new, envp);
 }
 

@@ -4,9 +4,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define MAX(a,b) ((a) < (b) ? (b) : (a))
-#define DMTCP_SRUN_HELPER_ADDR_ENV "DMTCP_SRUN_HELPER_ADDR"
-#define DMTCP_SRUN_HELPER_SYNC_ENV "DMTCP_SRUN_HELPER_SYNCFILE"
+
 
 //-------------------------------------8<------------------------------------------------//
 // This is a copy of the code from src/plugin/ipc/utils_ipc.cpp and SSH plugin

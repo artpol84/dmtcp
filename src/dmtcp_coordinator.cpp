@@ -1533,7 +1533,8 @@ void dmtcp::DmtcpCoordinator::writeRestartScript()
                   "    exit 0\n"
                   "  fi\n"
                   "fi\n"
-                  "\n\n");
+                  "\n\n"
+             );
 
     fprintf ( fp, "%s", theRestartScriptMultiHostProcessing );
   }

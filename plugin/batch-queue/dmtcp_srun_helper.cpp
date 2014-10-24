@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include "rm_main.h"
 #include "slurm_helper.h"
 
 extern "C" void slurm_srun_handler_register(int in, int out, int err, int *pid) __attribute((weak));
@@ -169,15 +170,6 @@ static void setup_signals_ini()
   // Track srun
   signal(SIGCHLD, signal_handler_ini);
 }
-
-#define FWD_TO_DEV_NULL(fd) \
-{ \
-  int tmp = open("/dev/null", O_CREAT|O_RDWR|O_TRUNC, 0666); \
-  if (tmp >= 0 && tmp != fd ) { \
-  dup2(tmp, fd); \
-  close(tmp); \
-  } \
-  }
 
 static void create_stdio_fds(int *in, int *out, int *err)
 {

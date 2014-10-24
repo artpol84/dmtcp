@@ -59,4 +59,24 @@ enum ResMgrFileType
   SLURM_TMPDIR
 };
 
+#define FWD_TO_DEV_NULL(fd) \
+{ \
+  int tmp = open("/dev/null", O_CREAT|O_RDWR|O_TRUNC, 0666); \
+  if (tmp >= 0 && tmp != fd ) { \
+  dup2(tmp, fd); \
+  close(tmp); \
+  } \
+}
+
+#define CHECK_FWD_TO_DEV_NULL(fd) \
+{ \
+  if( fcntl(fd,F_GETFL) == -1 ){ \
+    FWD_TO_DEV_NULL(fd) \
+  } \
+}
+
+#define DMTCP_SRUN_HELPER_ADDR_ENV "DMTCP_SRUN_HELPER_ADDR"
+#define DMTCP_SRUN_HELPER_SYNC_ENV "DMTCP_SRUN_HELPER_SYNCFILE"
+
+
 #endif
