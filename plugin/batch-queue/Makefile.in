@@ -129,7 +129,7 @@ $(targetdir)/bin/dmtcp_discover_rm: dmtcp_discover_rm.cpp $(DISCOVER_OBJS) \
 	$(CXXLINK) $(INCLUDES) $(CPPFLAGS) $(DISCOVER_OBJS) -o $@ $<
 
 $(targetdir)/bin/dmtcp_srun_helper: dmtcp_srun_helper.cpp slurm_helper.cpp
-    $(CXXLINK) $(INCLUDES) $(CPPFLAGS) $< slurm_helper.cpp
+	$(CXXLINK) $(INCLUDES) $(CPPFLAGS) $< slurm_helper.cpp
 
 %.o: %.c ${HEADERS}
 	$(COMPILE)  $<
