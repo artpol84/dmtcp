@@ -29,6 +29,8 @@ int srun_stderr = -1;
 pid_t srun_pid = -1, helper_pid = -1;
 int restart_fd = -1;
 
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+
 //-------------------------------------8<------------------------------------------------//
 // FIXME: this is exactly the same code as in src/plugin/ipc/ssh/util_ssh.cpp
 // We need to use the same code base in future.
